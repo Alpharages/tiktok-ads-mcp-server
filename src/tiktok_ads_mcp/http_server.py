@@ -99,7 +99,18 @@ def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run(build_app(), host=host, port=port)
+    # Trust X-Forwarded-* from the front proxy (nginx terminates TLS). Without
+    # this, uvicorn treats requests as http and emits http:// redirect targets
+    # (e.g. /mcp -> /mcp/), causing clients to drop the Authorization header on
+    # the scheme downgrade. The container is localhost-bound, so only the proxy
+    # can reach it — trusting all forwarded IPs is safe here.
+    uvicorn.run(
+        build_app(),
+        host=host,
+        port=port,
+        proxy_headers=True,
+        forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "*"),
+    )
 
 
 if __name__ == "__main__":
