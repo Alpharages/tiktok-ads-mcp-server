@@ -152,10 +152,15 @@ def start_manual_oauth(app_id: str, app_secret: str, force_reauth: bool = False)
     
     # Generate auth URL
     auth_url = oauth_client.get_authorization_url()
-    
-    # Open browser
-    webbrowser.open(auth_url)
-    
+
+    # Try to open a browser locally. On a headless server / container there is
+    # no browser, so this can raise webbrowser.Error — fall back to returning
+    # the auth_url in the response (the caller surfaces it for manual opening).
+    try:
+        webbrowser.open(auth_url)
+    except Exception as e:
+        logger.info(f"Could not open a browser automatically ({e}); open the auth_url manually.")
+
     return {
         'status': 'auth_started',
         'message': 'Browser opened for authentication. After authorizing, use tiktok_complete_auth with the authorization code.',

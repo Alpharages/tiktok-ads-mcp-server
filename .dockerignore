@@ -1,0 +1,29 @@
+# Secrets — never bake into the image
+.env
+*.env
+
+# Token store (mounted at runtime, must not be in the image)
+.tiktok_ads_mcp/
+
+# VCS / IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Python caches & build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Logs
+logs/
+*.log
+
+# Lockfile (image builds from pyproject/requirements via pip)
+uv.lock

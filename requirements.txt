@@ -13,9 +13,6 @@ pydantic>=2.0.0
 # Environment variables
 python-dotenv>=1.0.0
 
-# Async support
-asyncio>=3.4.3
-
 # Type hints support for older Python versions
 typing-extensions>=4.0.0
 
