@@ -23,10 +23,14 @@ RUN chown -R app:app /app
 
 USER app
 
-# Persist OAuth tokens across container runs (stdio clients launch a fresh
-# container per session, so this volume is what keeps you authenticated).
+# Persist OAuth tokens across container runs / restarts.
 VOLUME ["/home/app/.tiktok_ads_mcp"]
 
-# This is an MCP stdio server: it must be launched with `docker run -i`
-# (interactive stdin). Do NOT run it detached (-d) — there is no network port.
-ENTRYPOINT ["python", "run_server.py"]
+# Default = remote Streamable HTTP transport (for hosting). Listens on $PORT
+# (default 8000) and requires MCP_AUTH_TOKEN. Run detached behind a TLS proxy.
+EXPOSE 8000
+CMD ["python", "-m", "tiktok_ads_mcp.http_server"]
+
+# For local stdio use instead, override the command:
+#   docker run -i --rm --env-file .env -v ...:/home/app/.tiktok_ads_mcp \
+#     tiktok-ads-mcp:latest python run_server.py
