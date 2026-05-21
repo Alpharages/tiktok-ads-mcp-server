@@ -67,7 +67,9 @@ docker compose logs -f          # expect: "TikTok Ads MCP HTTP server ready"
 
 `docker-compose.yml` binds the container to **`127.0.0.1:8000`** only — it is
 never exposed directly to the internet. nginx (next step) is the public entry
-point. OAuth tokens persist in the `./tokens` volume across restarts.
+point. OAuth tokens persist in the **`tiktok-tokens`** Docker named volume
+across restarts and rebuilds (it inherits the container's uid `10001` ownership,
+so no manual `chown` is ever needed).
 
 Verify the container is up (loopback, no token required for health):
 
@@ -164,7 +166,7 @@ Auth is server-side and shared by all clients, so this is done **once**:
 2. Open that `auth_url` in a browser and authorize. You'll be redirected to your
    configured `TIKTOK_REDIRECT_URI` with a `?code=…` query parameter.
 3. Copy the `code` value and call **`tiktok_ads_complete_auth`** with it.
-4. Tokens are saved to the `./tokens` volume; restarts auto-authenticate.
+4. Tokens are saved to the `tiktok-tokens` named volume; restarts auto-authenticate.
 
 Check status any time with **`tiktok_ads_auth_status`**.
 
@@ -174,7 +176,7 @@ Check status any time with **`tiktok_ads_auth_status`**.
 ssh user@your-vps 'cd tiktok-ads-mcp-server && git pull && docker compose up -d --build'
 ```
 
-The `./tokens` volume is external to the image, so updates don't log you out.
+The `tiktok-tokens` volume is external to the image, so updates don't log you out.
 
 ## 8. Rotating the shared token
 
@@ -197,7 +199,8 @@ Then redistribute the new token to your developers.
 | Container won't start: "MCP_AUTH_TOKEN must be set" | `MCP_AUTH_TOKEN` empty/missing in `.env`. |
 | "Missing TikTok API credentials" | `.env` missing `TIKTOK_APP_ID`/`TIKTOK_APP_SECRET`. |
 | "Missing TIKTOK_REDIRECT_URI" on login | Set `TIKTOK_REDIRECT_URI` in `.env` to the URI registered in your TikTok app, then recreate the container. |
-| Re-prompted to log in after a rebuild | The `./tokens` volume isn't mounted or isn't writable by uid `10001`: `sudo chown -R 10001:10001 tokens`. |
+| `Permission denied` writing `tokens.json` | Only with a host bind-mount (e.g. the stdio appendix) whose dir is owned by root. The default `tiktok-tokens` named volume inherits uid `10001` and avoids this. For a bind-mount, fix the host dir: `sudo chown -R 10001:10001 <dir>`. |
+| Re-prompted to log in after a rebuild | The token volume wasn't reused. With the default named volume this shouldn't happen; check you didn't `docker compose down -v` (which deletes volumes) or rename the `tiktok-tokens` volume. |
 
 ## Appendix: Local stdio use
 
@@ -206,9 +209,12 @@ hosting, no token), override the container command to use stdio transport:
 
 ```bash
 docker run -i --rm --env-file .env \
-  -v "$PWD/tokens:/home/app/.tiktok_ads_mcp" \
+  -v tiktok-tokens:/home/app/.tiktok_ads_mcp \
   tiktok-ads-mcp:latest python run_server.py
 ```
 
-In this mode `MCP_AUTH_TOKEN`, `HOST`, and `PORT` are unused, and the MCP client
-config points at the `docker run … python run_server.py` command instead of a URL.
+Using the same `tiktok-tokens` named volume keeps tokens persistent and writable
+without a `chown` (a `-v "$PWD/tokens:…"` host bind-mount would need
+`sudo chown -R 10001:10001 tokens` first). In this mode `MCP_AUTH_TOKEN`, `HOST`,
+and `PORT` are unused, and the MCP client config points at the
+`docker run … python run_server.py` command instead of a URL.

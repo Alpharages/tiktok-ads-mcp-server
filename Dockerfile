@@ -19,7 +19,13 @@ COPY src/ ./src/
 RUN pip install .
 
 COPY run_server.py ./
-RUN chown -R app:app /app
+
+# Pre-create the token dir owned by the non-root user. A Docker *named* volume
+# mounted here inherits this ownership (uid 10001), so token writes work on any
+# fresh server with no manual chown. (A host bind-mount would NOT inherit it —
+# Docker creates a missing bind source as root.)
+RUN mkdir -p /home/app/.tiktok_ads_mcp \
+    && chown -R app:app /app /home/app/.tiktok_ads_mcp
 
 USER app
 
