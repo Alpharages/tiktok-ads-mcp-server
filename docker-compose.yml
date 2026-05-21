@@ -1,0 +1,29 @@
+services:
+  tiktok-ads-mcp:
+    build: .
+    image: tiktok-ads-mcp:latest
+    container_name: tiktok-ads-mcp
+    restart: unless-stopped
+    env_file: .env            # TIKTOK_APP_ID, TIKTOK_APP_SECRET, MCP_AUTH_TOKEN
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+    # Bind to localhost only: the public TLS endpoint is nginx, which proxies
+    # to this. The container is never directly exposed to the internet.
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Named volume (not a host bind-mount): it inherits the image dir's uid
+      # 10001 ownership, so the non-root container can write tokens with no
+      # manual chown on a fresh server. Back up / inspect with `docker compose
+      # cp tiktok-ads-mcp:/home/app/.tiktok_ads_mcp/tokens.json ./`.
+      - tiktok-tokens:/home/app/.tiktok_ads_mcp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  tiktok-tokens:

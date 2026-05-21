@@ -26,9 +26,10 @@ dependencies = [
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
-    "asyncio>=3.4.3",
     "typing-extensions>=4.0.0",
     "aiohttp>=3.12.15",
+    "uvicorn>=0.27.0",
+    "starlette>=0.37.0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +49,7 @@ Documentation = "https://docs.adsmcp.com/tiktok"
 
 [project.scripts]
 tiktok-ads-mcp = "tiktok_ads_mcp.server:main"
+tiktok-ads-mcp-http = "tiktok_ads_mcp.http_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tiktok_ads_mcp"]

@@ -24,7 +24,7 @@ from mcp.types import (
 from pydantic import BaseModel
 
 from .tiktok_client import TikTokAdsClient
-from .oauth_simple import SimpleTikTokOAuth, start_manual_oauth
+from .oauth_simple import SimpleTikTokOAuth, load_saved_tokens, start_manual_oauth
 from .tools import (
     CampaignTools,
     CreativeTools,
@@ -53,10 +53,15 @@ class TikTokMCPServer:
         self.reporting_tools: Optional[ReportingTools] = None
         self.app_id: Optional[str] = None
         self.app_secret: Optional[str] = None
+        self.redirect_uri: Optional[str] = None
         self.is_authenticated: bool = False
         self.primary_advertiser_id: Optional[str] = None
         self.available_advertiser_ids: List[str] = []
         self.oauth_client: Optional[SimpleTikTokOAuth] = None
+        # Set once a token is obtained, even if no advertiser account was
+        # granted (in which case no API client can be built — see
+        # _authenticate_with_tokens).
+        self.access_token: Optional[str] = None
         
     async def initialize(self):
         """Initialize the TikTok Ads MCP Server with credentials check."""
@@ -64,6 +69,9 @@ class TikTokMCPServer:
             # Store app credentials for OAuth login
             self.app_id = os.getenv("TIKTOK_APP_ID")
             self.app_secret = os.getenv("TIKTOK_APP_SECRET")
+            self.redirect_uri = (
+                (os.getenv("TIKTOK_REDIRECT_URI") or "").strip() or None
+            )
             access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
             advertiser_id = os.getenv("TIKTOK_ADVERTISER_ID")
             available_advertiser_ids = os.getenv("TIKTOK_AVAILABLE_ADVERTISER_IDS", "")
@@ -76,8 +84,13 @@ class TikTokMCPServer:
                     "Missing TikTok API credentials. Provide TIKTOK_APP_ID and TIKTOK_APP_SECRET environment variables."
                 )
             
-            # Initialize OAuth client
-            self.oauth_client = SimpleTikTokOAuth(self.app_id, self.app_secret)
+            # Initialize OAuth client only when a redirect URI is configured.
+            if self.redirect_uri:
+                self.oauth_client = SimpleTikTokOAuth(
+                    self.app_id,
+                    self.app_secret,
+                    self.redirect_uri,
+                )
             
             # If access token is provided, authenticate immediately (legacy mode)
             if access_token and advertiser_id:
@@ -92,8 +105,31 @@ class TikTokMCPServer:
             logger.error(f"Failed to initialize TikTok Ads MCP Server: {e}")
             raise
     
-    async def _authenticate_with_tokens(self, access_token: str, advertiser_id: str, available_advertiser_ids: list[str]):
-        """Authenticate using provided tokens."""
+    async def _authenticate_with_tokens(
+        self,
+        access_token: str,
+        advertiser_id: Optional[str],
+        available_advertiser_ids: list[str],
+    ) -> bool:
+        """Authenticate using provided tokens.
+
+        Returns True when a usable API client was built (an advertiser id was
+        available). Returns False when only the access token is known — TikTok
+        granted no advertiser (ad) accounts — in which case the token is still
+        kept (and saved on disk by the OAuth exchange) but no API client is
+        constructed, since the Ads API requires an advertiser id.
+        """
+        self.access_token = access_token
+        self.available_advertiser_ids = available_advertiser_ids or []
+
+        if not advertiser_id:
+            # OAuth succeeded but no ad account was granted. Keep the token,
+            # don't build a client that would raise on the missing advertiser id.
+            self.client = None
+            self.is_authenticated = False
+            self.primary_advertiser_id = None
+            return False
+
         # Initialize TikTok client
         self.client = TikTokAdsClient(
             app_id=self.app_id,
@@ -102,25 +138,28 @@ class TikTokMCPServer:
             advertiser_id=advertiser_id,
             available_advertiser_ids=available_advertiser_ids,
         )
-        
+
         # Initialize tool modules
         self.campaign_tools = CampaignTools(self.client)
         self.creative_tools = CreativeTools(self.client)
         self.performance_tools = PerformanceTools(self.client)
         self.audience_tools = AudienceTools(self.client)
         self.reporting_tools = ReportingTools(self.client)
-        
+
         self.is_authenticated = True
         self.primary_advertiser_id = advertiser_id
         self.available_advertiser_ids = available_advertiser_ids
-        
+        return True
+
     async def start_oauth_flow(self, force_reauth: bool = False) -> Dict[str, Any]:
         """Start OAuth flow (non-blocking)."""
-        if not self.oauth_client:
-            return {"success": False, "error": "OAuth client not initialized"}
-        
         try:
-            result, token_data = start_manual_oauth(self.app_id, self.app_secret, force_reauth=force_reauth)
+            result, token_data = start_manual_oauth(
+                self.app_id,
+                self.app_secret,
+                self.redirect_uri,
+                force_reauth=force_reauth,
+            )
             if token_data:
                 await self._authenticate_with_tokens(
                     token_data['access_token'], 
@@ -134,10 +173,24 @@ class TikTokMCPServer:
     
     async def complete_oauth(self, auth_code: str) -> Dict[str, Any]:
         """Complete OAuth flow with authorization code."""
-        if not self.oauth_client:
-            return {"success": False, "data": {"error": "OAuth client not initialized"}}
+        if not self.redirect_uri:
+            return {
+                "success": False,
+                "data": {
+                    "error": (
+                        "Missing TIKTOK_REDIRECT_URI environment variable. "
+                        "Set it to the redirect URI registered in your TikTok app."
+                    )
+                },
+            }
         
         try:
+            if not self.oauth_client:
+                self.oauth_client = SimpleTikTokOAuth(
+                    self.app_id,
+                    self.app_secret,
+                    self.redirect_uri,
+                )
             token_data = await self.oauth_client.exchange_code_for_token(auth_code)
             
             if not token_data:
@@ -145,24 +198,50 @@ class TikTokMCPServer:
             
             if "error_message" in token_data:
                 return {"success": False, "data": {"error": token_data["error_message"]}}
-            
-            # Authenticate with the tokens
-            await self._authenticate_with_tokens(
-                token_data['access_token'], 
-                token_data['primary_advertiser_id'],
-                token_data['advertiser_ids'],
+
+            access_token = token_data.get('access_token')
+            advertiser_ids = token_data.get('advertiser_ids') or []
+            primary_advertiser_id = advertiser_ids[0] if advertiser_ids else None
+
+            # The OAuth exchange already persisted the token to disk regardless
+            # of advertiser_ids. Build the API client only if an ad account was
+            # granted; otherwise complete the flow successfully with a clear note.
+            authenticated = await self._authenticate_with_tokens(
+                access_token,
+                primary_advertiser_id,
+                advertiser_ids,
             )
-            self.available_advertiser_ids = token_data['advertiser_ids']
-            self.primary_advertiser_id = token_data['primary_advertiser_id']
-            
-            logger.info(f"OAuth completed successfully. Using advertiser ID: {token_data['primary_advertiser_id']}")
-            
+
+            if not authenticated:
+                logger.info(
+                    "OAuth completed and access token saved, but TikTok granted "
+                    "no advertiser (ad) accounts."
+                )
+                return {
+                    "success": True,
+                    "data": {
+                        "status": "authenticated_no_ad_account",
+                        "message": (
+                            "Authentication succeeded and the access token was saved, "
+                            "but no advertiser (ad) accounts are linked to this TikTok "
+                            "app/user. Grant an ad account to the app in TikTok Business "
+                            "Center (and select it on the consent screen), then run "
+                            "tiktok_ads_login with force_reauth=true to load it. "
+                            "Ad-serving tools stay unavailable until an ad account is linked."
+                        ),
+                        "primary_advertiser_id": None,
+                        "available_advertiser_ids": [],
+                    },
+                }
+
+            logger.info(f"OAuth completed successfully. Using advertiser ID: {primary_advertiser_id}")
+
             return {
                 "success": True,
                 "data": {
                     "message": "Authentication completed successfully",
-                    "primary_advertiser_id": token_data['primary_advertiser_id'],
-                    "available_advertiser_ids": token_data['advertiser_ids']
+                    "primary_advertiser_id": primary_advertiser_id,
+                    "available_advertiser_ids": advertiser_ids
                 }
             }
             
@@ -185,22 +264,36 @@ class TikTokMCPServer:
                 }
             }
         else:
-            oauth_client = SimpleTikTokOAuth(self.app_id, self.app_secret)
-            saved_tokens = oauth_client.load_saved_tokens()
+            saved_tokens = load_saved_tokens()
             if saved_tokens and saved_tokens.get('access_token'):
-                await self._authenticate_with_tokens(
-                    saved_tokens['access_token'], 
-                    saved_tokens['primary_advertiser_id'],
-                    saved_tokens['advertiser_ids'],
+                authenticated = await self._authenticate_with_tokens(
+                    saved_tokens['access_token'],
+                    saved_tokens.get('primary_advertiser_id'),
+                    saved_tokens.get('advertiser_ids', []),
                 )
+                if authenticated:
+                    return {
+                        'success': True,
+                        'data': {
+                            'status': 'authenticated',
+                            'app_id': self.app_id,
+                            'available_advertiser_ids': saved_tokens.get('advertiser_ids', []),
+                            'primary_advertiser_id': saved_tokens.get('primary_advertiser_id'),
+                            'message': 'Already authenticated with saved tokens',
+                        }
+                    }
                 return {
                     'success': True,
                     'data': {
-                        'status': 'authenticated',
+                        'status': 'authenticated_no_ad_account',
                         'app_id': self.app_id,
-                        'available_advertiser_ids': saved_tokens.get('advertiser_ids', []),
-                        'primary_advertiser_id': saved_tokens.get('primary_advertiser_id'),
-                        'message': 'Already authenticated with saved tokens',
+                        'available_advertiser_ids': [],
+                        'primary_advertiser_id': None,
+                        'message': (
+                            'A saved access token exists, but no advertiser (ad) accounts '
+                            'are linked. Grant an ad account in TikTok Business Center, then '
+                            'run tiktok_ads_login with force_reauth=true.'
+                        ),
                     }
                 }
             else:

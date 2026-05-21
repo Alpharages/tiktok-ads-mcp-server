@@ -16,13 +16,35 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def load_saved_tokens() -> Optional[Dict]:
+    """Load previously saved tokens."""
+    token_file = os.path.expanduser("~/.tiktok_ads_mcp/tokens.json")
+
+    try:
+        if not os.path.exists(token_file):
+            return None
+
+        with open(token_file, 'r') as f:
+            token_data = json.load(f)
+
+        return {
+            'access_token': token_data.get('access_token'),
+            'advertiser_ids': token_data.get('advertiser_ids', []),
+            'primary_advertiser_id': token_data.get('advertiser_ids', [None])[0]
+        }
+
+    except Exception as e:
+        logger.error(f"Error loading tokens: {e}")
+        return None
+
+
 class SimpleTikTokOAuth:
     """Simplified TikTok OAuth that generates manual auth URL."""
 
     AUTHORIZATION_URL = "https://business-api.tiktok.com/portal/auth"
     TOKEN_URL = "https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/"
     
-    def __init__(self, app_id: str, app_secret: str, redirect_uri: str = "https://adsmcp.com"):
+    def __init__(self, app_id: str, app_secret: str, redirect_uri: str):
         """Initialize OAuth client.
         
         Args:
@@ -32,7 +54,9 @@ class SimpleTikTokOAuth:
         """
         self.app_id = app_id
         self.app_secret = app_secret
-        self.redirect_uri = redirect_uri
+        self.redirect_uri = redirect_uri.strip()
+        if not self.redirect_uri:
+            raise ValueError("OAuth redirect URI must be provided.")
         
     def _generate_code_verifier(self) -> str:
         """Generate PKCE code verifier."""
@@ -65,14 +89,24 @@ class SimpleTikTokOAuth:
             header = {
                 "Content-Type": "application/json"
             }
-            logger.info(f"Requesting token with data: {data}")
-            
+            # Do NOT log `data` — it contains app_secret and the auth_code.
+            logger.info("Requesting access token from TikTok (app_id=%s).", self.app_id)
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(self.TOKEN_URL, json=data, headers=header)
                 response.raise_for_status()
-                
+
                 result = response.json()
-                logger.info(f"Token exchange result: {result}")
+                # Log a redacted summary only — the full result contains the
+                # access_token. advertiser_ids count is the useful diagnostic.
+                data_block = result.get('data') or {}
+                logger.info(
+                    "Token exchange response: code=%s message=%s request_id=%s advertiser_ids=%d",
+                    result.get('code'),
+                    result.get('message'),
+                    result.get('request_id'),
+                    len(data_block.get('advertiser_ids') or []),
+                )
                 if result.get('code') != 0:
                     error_msg = result.get('message', 'Unknown error')
                     logger.error(f"Token exchange failed: {error_msg}")
@@ -116,32 +150,18 @@ class SimpleTikTokOAuth:
     
     def load_saved_tokens(self) -> Optional[Dict]:
         """Load previously saved tokens."""
-        token_file = os.path.expanduser("~/.tiktok_ads_mcp/tokens.json")
-        
-        try:
-            if not os.path.exists(token_file):
-                return None
-                
-            with open(token_file, 'r') as f:
-                token_data = json.load(f)
-            
-            return {
-                'access_token': token_data.get('access_token'),
-                'advertiser_ids': token_data.get('advertiser_ids', []),
-                'primary_advertiser_id': token_data.get('advertiser_ids', [None])[0]
-            }
-            
-        except Exception as e:
-            logger.error(f"Error loading tokens: {e}")
-            return None
+        return load_saved_tokens()
 
 
-def start_manual_oauth(app_id: str, app_secret: str, force_reauth: bool = False) -> Tuple[Dict[str, str], Optional[Dict]]:
+def start_manual_oauth(
+    app_id: str,
+    app_secret: str,
+    redirect_uri: Optional[str],
+    force_reauth: bool = False,
+) -> Tuple[Dict[str, str], Optional[Dict]]:
     """Start manual OAuth flow that doesn't block the server."""
-    oauth_client = SimpleTikTokOAuth(app_id, app_secret)
-    
     # Check for existing tokens first
-    saved_tokens = oauth_client.load_saved_tokens()
+    saved_tokens = load_saved_tokens()
     if saved_tokens and saved_tokens.get('access_token') and not force_reauth:
         return {
             'authenticated': True,
@@ -149,21 +169,40 @@ def start_manual_oauth(app_id: str, app_secret: str, force_reauth: bool = False)
             'primary_advertiser_id': saved_tokens.get('primary_advertiser_id'),
             'message': 'Already authenticated with saved tokens',
         }, saved_tokens
+
+    if not redirect_uri:
+        raise ValueError(
+            "Missing TIKTOK_REDIRECT_URI environment variable. Set it to the "
+            "redirect URI registered in your TikTok app."
+        )
+
+    oauth_client = SimpleTikTokOAuth(app_id, app_secret, redirect_uri)
     
     # Generate auth URL
     auth_url = oauth_client.get_authorization_url()
-    
-    # Open browser
-    webbrowser.open(auth_url)
-    
+
+    # Try to open a browser locally. On a headless server / container there is
+    # no browser, so this can raise webbrowser.Error — fall back to returning
+    # the auth_url in the response (the caller surfaces it for manual opening).
+    try:
+        webbrowser.open(auth_url)
+    except Exception as e:
+        logger.info(
+            f"Could not open a browser automatically ({e}); "
+            "open the auth_url manually."
+        )
+
     return {
         'status': 'auth_started',
-        'message': 'Browser opened for authentication. After authorizing, use tiktok_complete_auth with the authorization code.',
+        'message': (
+            'Browser opened for authentication. After authorizing, use '
+            'tiktok_ads_complete_auth with the authorization code.'
+        ),
         'auth_url': auth_url,
         'instructions': [
             '1. Complete authorization in the opened browser',
             '2. You will be redirected to your configured redirect URI',
             '3. Copy the "code" parameter from the redirect URL',
-            '4. Use the tiktok_complete_auth tool with that code'
+            '4. Use the tiktok_ads_complete_auth tool with that code'
         ]
-    },None
+    }, None
