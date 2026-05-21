@@ -89,14 +89,24 @@ class SimpleTikTokOAuth:
             header = {
                 "Content-Type": "application/json"
             }
-            logger.info(f"Requesting token with data: {data}")
-            
+            # Do NOT log `data` — it contains app_secret and the auth_code.
+            logger.info("Requesting access token from TikTok (app_id=%s).", self.app_id)
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(self.TOKEN_URL, json=data, headers=header)
                 response.raise_for_status()
-                
+
                 result = response.json()
-                logger.info(f"Token exchange result: {result}")
+                # Log a redacted summary only — the full result contains the
+                # access_token. advertiser_ids count is the useful diagnostic.
+                data_block = result.get('data') or {}
+                logger.info(
+                    "Token exchange response: code=%s message=%s request_id=%s advertiser_ids=%d",
+                    result.get('code'),
+                    result.get('message'),
+                    result.get('request_id'),
+                    len(data_block.get('advertiser_ids') or []),
+                )
                 if result.get('code') != 0:
                     error_msg = result.get('message', 'Unknown error')
                     logger.error(f"Token exchange failed: {error_msg}")
