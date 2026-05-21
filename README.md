@@ -62,6 +62,7 @@ Add to your MCP client configuration (e.g., Claude Desktop):
       "env": {
         "TIKTOK_APP_ID": "your_app_id",
         "TIKTOK_APP_SECRET": "your_app_secret",
+        "TIKTOK_REDIRECT_URI": "https://your-domain.example/oauth/callback"
       }
     }
   }
@@ -96,6 +97,7 @@ Add to your MCP client configuration (e.g., Claude Desktop):
 
 2. **Get API Credentials**
    - App ID and App Secret from your registered app
+   - Register your redirect URI in the TikTok app and set the same value in `TIKTOK_REDIRECT_URI`
    - Generate access token through OAuth flow
    - Note your Advertiser ID
 

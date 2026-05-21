@@ -24,7 +24,7 @@ from mcp.types import (
 from pydantic import BaseModel
 
 from .tiktok_client import TikTokAdsClient
-from .oauth_simple import SimpleTikTokOAuth, start_manual_oauth
+from .oauth_simple import SimpleTikTokOAuth, load_saved_tokens, start_manual_oauth
 from .tools import (
     CampaignTools,
     CreativeTools,
@@ -53,6 +53,7 @@ class TikTokMCPServer:
         self.reporting_tools: Optional[ReportingTools] = None
         self.app_id: Optional[str] = None
         self.app_secret: Optional[str] = None
+        self.redirect_uri: Optional[str] = None
         self.is_authenticated: bool = False
         self.primary_advertiser_id: Optional[str] = None
         self.available_advertiser_ids: List[str] = []
@@ -64,6 +65,9 @@ class TikTokMCPServer:
             # Store app credentials for OAuth login
             self.app_id = os.getenv("TIKTOK_APP_ID")
             self.app_secret = os.getenv("TIKTOK_APP_SECRET")
+            self.redirect_uri = (
+                (os.getenv("TIKTOK_REDIRECT_URI") or "").strip() or None
+            )
             access_token = os.getenv("TIKTOK_ACCESS_TOKEN")
             advertiser_id = os.getenv("TIKTOK_ADVERTISER_ID")
             available_advertiser_ids = os.getenv("TIKTOK_AVAILABLE_ADVERTISER_IDS", "")
@@ -76,8 +80,13 @@ class TikTokMCPServer:
                     "Missing TikTok API credentials. Provide TIKTOK_APP_ID and TIKTOK_APP_SECRET environment variables."
                 )
             
-            # Initialize OAuth client
-            self.oauth_client = SimpleTikTokOAuth(self.app_id, self.app_secret)
+            # Initialize OAuth client only when a redirect URI is configured.
+            if self.redirect_uri:
+                self.oauth_client = SimpleTikTokOAuth(
+                    self.app_id,
+                    self.app_secret,
+                    self.redirect_uri,
+                )
             
             # If access token is provided, authenticate immediately (legacy mode)
             if access_token and advertiser_id:
@@ -116,11 +125,13 @@ class TikTokMCPServer:
         
     async def start_oauth_flow(self, force_reauth: bool = False) -> Dict[str, Any]:
         """Start OAuth flow (non-blocking)."""
-        if not self.oauth_client:
-            return {"success": False, "error": "OAuth client not initialized"}
-        
         try:
-            result, token_data = start_manual_oauth(self.app_id, self.app_secret, force_reauth=force_reauth)
+            result, token_data = start_manual_oauth(
+                self.app_id,
+                self.app_secret,
+                self.redirect_uri,
+                force_reauth=force_reauth,
+            )
             if token_data:
                 await self._authenticate_with_tokens(
                     token_data['access_token'], 
@@ -134,10 +145,24 @@ class TikTokMCPServer:
     
     async def complete_oauth(self, auth_code: str) -> Dict[str, Any]:
         """Complete OAuth flow with authorization code."""
-        if not self.oauth_client:
-            return {"success": False, "data": {"error": "OAuth client not initialized"}}
+        if not self.redirect_uri:
+            return {
+                "success": False,
+                "data": {
+                    "error": (
+                        "Missing TIKTOK_REDIRECT_URI environment variable. "
+                        "Set it to the redirect URI registered in your TikTok app."
+                    )
+                },
+            }
         
         try:
+            if not self.oauth_client:
+                self.oauth_client = SimpleTikTokOAuth(
+                    self.app_id,
+                    self.app_secret,
+                    self.redirect_uri,
+                )
             token_data = await self.oauth_client.exchange_code_for_token(auth_code)
             
             if not token_data:
@@ -185,8 +210,7 @@ class TikTokMCPServer:
                 }
             }
         else:
-            oauth_client = SimpleTikTokOAuth(self.app_id, self.app_secret)
-            saved_tokens = oauth_client.load_saved_tokens()
+            saved_tokens = load_saved_tokens()
             if saved_tokens and saved_tokens.get('access_token'):
                 await self._authenticate_with_tokens(
                     saved_tokens['access_token'], 
